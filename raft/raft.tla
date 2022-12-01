@@ -23,6 +23,8 @@ CONSTANTS Nil
 CONSTANTS RequestVoteRequest, RequestVoteResponse,
           AppendEntriesRequest, AppendEntriesResponse
 
+CONSTANTS MaxTermSize, MaxLogSize
+
 ----
 \* Global variables
 
@@ -483,7 +485,8 @@ RaftTypeCheckOK == NoSplitBrain
 \* Action constraints
 
 ActionConstraints == \A s \in Server:
-                         /\ Len(log[s]) < 2
-                         /\ currentTerm[s] < 3
+                         /\ Len(log[s]) <= MaxLogSize
+                         /\ currentTerm[s] <= MaxTermSize
 
 ===============================================================================
+
