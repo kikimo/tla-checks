@@ -25,7 +25,6 @@ VARIABLE role
 
 VARIABLE msgs
 
-
 \* helpers
 SendMsg(m) == msgs' = msgs \cup {m}
 
@@ -43,23 +42,26 @@ BecomeCandidate(s) == /\ currentTerm[s] + 1 <= MaxTerm
 
 RequestVote(s) == /\ role[s] = Candidate
                   /\ \E dst \in Servers\{s}:
-                       /\ ~ \E m \in msgs:
-                              /\ m.dst = dst
-                              /\ m.src = s
-                              /\ m.term = currentTerm[s]
-                              /\ m.type = VoteReq
-                       /\ SendMsg([ dst |-> dst, src |-> s, term |-> currentTerm[s], type |-> VoteReq ])
-                  /\ UNCHANGED <<votedFor, currentTerm, role>>
+                       LET
+                         m == [ dst |-> dst, src |-> s, term |-> currentTerm[s], type |-> VoteReq ]
+                       IN
+                         /\ m \notin msgs
+                         /\ SendMsg(m)
+                         /\ UNCHANGED <<votedFor, currentTerm, role>>
 
-ResponseVote(s) == /\ \E m \in msgs:
+ResponseVote(s) == /\ role[s] = Follower
+                   /\ \E m \in msgs:
                         /\ m.dst = s
                         /\ m.type = VoteReq
-                        /\ \/ currentTerm[s] < m.term
-                           \/ currentTerm[s] = m.term /\ votedFor[s] = None
-                        /\ SendMsg([ dst |-> m.src, src |-> s, term |-> m.term, type |-> VoteResp ])
-                        /\ currentTerm' = [ currentTerm EXCEPT ![s] = m.term ]
-                        /\ votedFor' = [ votedFor EXCEPT ![s] = m.src ]
-                   /\ role' = [ role EXCEPT ![s] = Follower ]
+                        /\ m.term = currentTerm[s]
+                        /\ votedFor[s] = None
+                        /\ LET
+                             gm == [ dst |-> m.src, src |-> s, term |-> m.term, type |-> VoteResp ]
+                           IN
+                             /\ gm \notin msgs
+                             /\ SendMsg(gm)
+                             /\ votedFor' = [ votedFor EXCEPT ![s] = m.src ]
+                             /\ UNCHANGED <<currentTerm, role>>
 
 BecomeLeader(s) == /\ role[s] = Candidate
                    /\ LET
@@ -73,8 +75,43 @@ BecomeLeader(s) == /\ role[s] = Candidate
                         \* /\ Print({role', currentTerm, votedFor}, TRUE)
                         /\ UNCHANGED <<currentTerm, votedFor, msgs>>
 
+
+FollowerUpdateTerm(s) == /\ role[s] = Follower
+                         /\ \E m \in msgs:
+                              /\ m.term > currentTerm[s]
+                              /\ m.dst = s
+                              /\ currentTerm' = [ currentTerm EXCEPT ![s] = m.term ]
+                              /\ UNCHANGED <<votedFor, msgs, role>>
+
+CandateToFollower(s) == /\ role[s] = Candidate
+                        /\ \E m \in msgs:
+                             \/ /\ m.term > currentTerm[s]
+                                /\ m.dst = s
+                                /\ currentTerm' = [ currentTerm EXCEPT ![s] = m.term ]
+                                /\ role' = [ role EXCEPT ![s] = Follower ]
+                                /\ votedFor' = [ votedFor EXCEPT ![s] = None ]
+                                /\ UNCHANGED msgs
+\*                             \/ /\ m.term = currentTerm[s]
+\*                                /\ m.dst = s
+\*                                /\ m.type = AppendReq
+\*                                /\ ...
+
+LeaderToFollower(s) == /\ role[s] = Leader
+                       /\ \E m \in msgs:
+                            /\ m.term > currentTerm[s]
+                            /\ m.dst = s
+                            /\ currentTerm' = [ currentTerm EXCEPT ![s] = m.term ]
+                            /\ role' = [ role EXCEPT ![s] = Follower ]
+                            /\ votedFor' = [ votedFor EXCEPT ![s] = None ]
+                            /\ UNCHANGED msgs
+
+BecomeFollower(s) == \/ FollowerUpdateTerm(s)
+                     \/ CandateToFollower(s)
+                     \/ LeaderToFollower(s)
+
 Next == \E s \in Servers:
           \/ BecomeCandidate(s)
+          \/ BecomeFollower(s)
           \/ RequestVote(s)
           \/ ResponseVote(s)
           \/ BecomeLeader(s)
@@ -89,5 +126,5 @@ NoSplitVote == /\ ~ \E s1, s2 \in Servers:
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Dec 14 23:23:29 CST 2022 by wenlinwu
+\* Last modified Tue Dec 20 16:21:07 CST 2022 by wenlinwu
 \* Created Wed Dec 14 10:07:36 CST 2022 by wenlinwu
