@@ -59,6 +59,21 @@ FindMedian(F) ==
   IN
     mlist[pos]
 
+HasAllCommitedLog(l, f) == 
+  LET
+    lsz == Len(logs[l])
+    domain == DOMAIN currentTerm
+    x == CHOOSE u \in domain: \A v \in domain: currentTerm[u] >= currentTerm[v]
+    maxTerm == currentTerm[x]
+  IN
+    IF currentTerm[l] = maxTerm THEN
+      /\ lsz >= commitIndex[f]
+      /\ SubSeq(logs[l], 1, commitIndex[f]) = SubSeq(logs[f], 1, commitIndex[f])
+    ELSE
+      TRUE
+
+LeaderCompleteness(s) == \A f \in Servers\{s}: HasAllCommitedLog(s, f)
+
 \* raft spec
 Init == /\ votedFor = [s \in Servers |-> None ]
         /\ currentTerm = [ s \in Servers |-> 0 ]
@@ -121,13 +136,14 @@ BecomeLeader(s) == /\ role[s] = Candidate
                                                /\ m.type = VoteResp }
                       IN
                         /\ (Cardinality(resps) + 1) * 2 > Cardinality(Servers)
+                        /\ Assert(LeaderCompleteness(s), {s, resps})
                         /\ role' = [ role EXCEPT ![s] = Leader ]
-                        /\ matchIndex' = [ matchIndex EXCEPT ![s] = [ u \in Servers |->  IF u # s THEN commitIndex[s] ELSE Len(logs[s]) ] ]
+                        /\ matchIndex' = [ matchIndex EXCEPT ![s] = [ u \in Servers |->  IF u # s THEN 1 ELSE Len(logs[s]) ] ]
                         /\ nextIndex' = [ nextIndex EXCEPT ![s] = [ u \in Servers |-> Len(logs[s])+1 ] ]
                         \* /\ Print(resps, TRUE)
                         \* /\ Print({role', currentTerm, votedFor}, TRUE)
                         /\ UNCHANGED <<currentTerm, votedFor, msgs, logs, commitIndex>>
-
+                        /\ Print([IsLeader |-> s, term |-> currentTerm[s]], TRUE)
 
 FollowerUpdateTerm(s) == /\ role[s] = Follower
                          /\ \E m \in msgs:
@@ -152,6 +168,7 @@ CandateToFollower(s) == /\ role[s] = Candidate
 
 LeaderToFollower(s) == /\ role[s] = Leader
                        /\ \E m \in msgs:
+                            \* /\ Print(m, TRUE)
                             /\ m.term > currentTerm[s]
                             /\ m.dst = s
                             /\ currentTerm' = [ currentTerm EXCEPT ![s] = m.term ]
@@ -173,11 +190,12 @@ LeaderAppendEntry(s) ==
   /\ role[s] = Leader
   /\ \E dst \in Servers:
        /\ dst # s
-       /\ nextIndex[s][dst] <= Len(logs[s])
+       /\ nextIndex[s][dst] <= Len(logs[s]) + 1
        /\ LET
             prevLogIndex == nextIndex[s][dst] - 1
             prevLogTerm == logs[s][prevLogIndex].term
-            \* send only one entry at a time
+            \* entries == <<>> if nextIndex[s][dst] > Len(logs[s])
+            entries == SubSeq(logs[s], nextIndex[s][dst], Len(logs[s]))
             m == [
               type |-> AppendReq,
               dst |-> dst,
@@ -185,8 +203,8 @@ LeaderAppendEntry(s) ==
               prevLogIndex |-> prevLogIndex,
               prevLogTerm |-> prevLogTerm,
               term |-> currentTerm[s],
-              entry |-> logs[s][prevLogIndex+1]
-            ]
+              entries |-> entries
+            ] 
           IN
             /\ m \notin msgs
             /\ SendMsg(m)
@@ -195,12 +213,6 @@ LeaderAppendEntry(s) ==
 IsLogMatch(s, m) ==
   /\ m.prevLogIndex <= Len(logs[s]) 
   /\ m.prevLogTerm = logs[s][m.prevLogIndex].term
-
-MakeAppendResp(s, m) ==
-  IF IsLogMatch(s, m) THEN
-    [type |-> AppendResp, dst |-> m.src, src |-> s, prevLogIndex |-> m.prevLogIndex, succ |-> TRUE, term |-> m.term]
-  ELSE 
-    [type |-> AppendResp, dst |-> m.src, src |-> s, prevLogIndex |-> m.prevLogIndex - 1, succ |-> FALSE, term |-> m.term]
 
 FollowerAppendEntry(s) == 
   /\ role[s] = Follower
@@ -211,15 +223,39 @@ FollowerAppendEntry(s) ==
        /\ Assert(m.prevLogIndex >= commitIndex[s], "illegal log match state")
        /\ IF IsLogMatch(s, m) THEN
             LET
-              resp == [type |-> AppendResp, dst |-> m.src, src |-> s, prevLogIndex |-> m.prevLogIndex, succ |-> TRUE, term |-> m.term]
+              resp == [
+                type |-> AppendResp,
+                dst |-> m.src,
+                src |-> s,
+                prevLogIndex |-> m.prevLogIndex + Len(m.entries),
+                succ |-> TRUE,
+                term |-> m.term
+              ]
+              newLog == SubSeq(logs[s], 1, m.prevLogIndex) \o m.entries
+              appendNew == Len(newLog) > Len(logs[s])
+              truncated == /\ Len(newLog) <= Len(logs[s])
+                           /\ newLog # SubSeq(logs[s], 1, Len(newLog))
+              updateLog == appendNew \/ truncated
             IN
               /\ resp \notin msgs
-              /\ SendMsg(resp)
-              /\ logs' = [ logs EXCEPT ![s] = Append(SubSeq(logs[s], 1, m.prevLogIndex), m.entry) ]
-              /\ UNCHANGED <<Indexes, currentTerm, votedFor, role>>
+              /\ IF updateLog THEN
+                   /\ SendMsg(resp)
+                   /\ logs' = [ logs EXCEPT ![s] = newLog ]
+                   \* /\ Print([ msg |-> m, logs |-> logs[s], entries |-> m.entries, newLog |-> newLog ], TRUE)
+                   /\ UNCHANGED <<Indexes, currentTerm, votedFor, role>>
+                 ELSE
+                   /\ SendMsg(resp)
+                   /\ UNCHANGED <<Indexes, currentTerm, votedFor, role, logs>>
           ELSE
             LET
-              resp == [type |-> AppendResp, dst |-> m.src, src |-> s, prevLogIndex |-> m.prevLogIndex - 1, succ |-> FALSE, term |-> m.term]
+              resp == [
+                type |-> AppendResp,
+                dst |-> m.src,
+                src |-> s,
+                prevLogIndex |-> m.prevLogIndex - 1,
+                succ |-> FALSE,
+                term |-> m.term
+              ]
             IN
               /\ resp \notin msgs
               /\ SendMsg(resp)
@@ -233,15 +269,17 @@ HandleAppendResp(s) ==
     /\ m.dst = s
     /\ m.term = currentTerm[s]
     /\ IF m.succ THEN
-         /\ matchIndex[s][m.src] < m.prevLogIndex + 1
-         /\ matchIndex' = [ matchIndex EXCEPT ![s][m.src] = m.prevLogIndex + 1 ]
-         /\ nextIndex' = [ nextIndex EXCEPT ![s][m.src] = m.prevLogIndex + 2 ]
+         /\ matchIndex[s][m.src] < m.prevLogIndex
+         /\ matchIndex' = [ matchIndex EXCEPT ![s][m.src] = m.prevLogIndex ]
+         /\ nextIndex' = [ nextIndex EXCEPT ![s][m.src] = m.prevLogIndex + 1 ]
          \* TODO commit entry if possible
          /\ UNCHANGED <<currentTerm, votedFor, role, msgs, commitIndex, logs>>
        ELSE
          \* enabling condition
-         /\ m.prevLogIndex + 1 = nextIndex[s][m.src] - 1
-         /\ Assert(m.prevLogIndex + 1 > matchIndex[s][m.src], "illegal nextIndex status")
+         /\ m.prevLogIndex + 2 = nextIndex[s][m.src]
+         /\ m.prevLogIndex >= matchIndex[s][m.src]
+         /\ nextIndex[s][m.src] # m.prevLogIndex + 1
+         \* /\ Assert(m.prevLogIndex + 1 > matchIndex[s][m.src], {s, m, matchIndex[s], nextIndex[s]})
          /\ nextIndex' = [ nextIndex EXCEPT ![s][m.src] = m.prevLogIndex + 1 ]
          /\ UNCHANGED <<currentTerm, votedFor, role, msgs, commitIndex, matchIndex, logs>>
 
@@ -261,11 +299,11 @@ Next == \E s \in Servers:
           \/ RequestVote(s)
           \/ ResponseVote(s)
           \/ BecomeLeader(s)
-          \/ ClientReq(s)
-          \/ LeaderAppendEntry(s)
-          \/ FollowerAppendEntry(s)
-          \/ HandleAppendResp(s)
-          \/ LeaderCanCommit(s)
+          \* \/ ClientReq(s)
+          \* \/ LeaderAppendEntry(s)
+          \* \/ FollowerAppendEntry(s)
+          \* \/ HandleAppendResp(s)
+          \* \/ LeaderCanCommit(s)
 
 \* Invariants
 NoSplitVote == ~ \E s1, s2 \in Servers:
@@ -285,5 +323,5 @@ NoLogDivergence == ~ \E s1, s2 \in Servers:
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Dec 21 22:18:25 CST 2022 by wenlinwu
+\* Last modified Sat Dec 24 11:44:41 CST 2022 by wenlinwu
 \* Created Wed Dec 14 10:07:36 CST 2022 by wenlinwu
